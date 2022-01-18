@@ -17,4 +17,6 @@ In this example, we are skipping 4 out of every 5 frames, which should make the 
 
 This is how the results look like:
 
-![openpose_skip_3_frames](../../docs/openpose_skip_3_frames.gif)
+![openposev17_1_skip_5_frames](../../docs/openposev17_1_skip_5_frames.gif)
+
+![openposev17_2_skip_5_frames](../../docs/openposev17_2_skip_5_frames.gif)
