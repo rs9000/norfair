@@ -18,7 +18,8 @@ class Tracker:
         pointwise_hit_counter_max: int = 4,
         detection_threshold: float = 0,
         filter_factory: "FilterPyKalmanFilterFactory" = FilterPyKalmanFilterFactory(),
-        past_detections_length: int = 4
+        past_detections_length: int = 4,
+        ema_alpha: float = 0.9        
     ):
         self.tracked_objects: Sequence["TrackedObject"] = []
         self.distance_function = distance_function
@@ -47,6 +48,7 @@ class Tracker:
         self.distance_threshold = distance_threshold
         self.detection_threshold = detection_threshold
         TrackedObject.count = 0
+        self.ema_alpha = ema_alpha
 
     def update(self, detections: Optional[List["Detection"]] = None, period: int = 1):
         self.period = period
@@ -79,7 +81,8 @@ class Tracker:
                     self.detection_threshold,
                     self.period,
                     self.filter_factory,
-                    self.past_detections_length
+                    self.past_detections_length,
+                    self.ema_alpha
                 )
             )
 
@@ -210,7 +213,8 @@ class TrackedObject:
         detection_threshold: float,
         period: int,
         filter_factory: "FilterFactory",
-        past_detections_length: int
+        past_detections_length: int,
+        alpha: float = 0.9
     ):
         try:
             initial_detection_points = validate_points(initial_detection.points)
@@ -251,6 +255,11 @@ class TrackedObject:
         self.filter = filter_factory.create_filter(initial_detection_points)
         self.dim_z = 2 * self.num_points
         self.label = initial_detection.label
+        self.alpha = alpha
+        if self.last_detection.embedding is not None:
+            self.embeddings_ema = self.last_detection.embedding
+        else:
+            self.embeddings_ema = None
 
     def tracker_step(self):
         self.hit_counter -= 1
@@ -287,6 +296,7 @@ class TrackedObject:
     def hit(self, detection: "Detection", period: int = 1):
         points = validate_points(detection.points)
         self.conditionally_add_to_past_detections(detection)
+        self.update_embeddings_ema(detection)
 
         self.last_detection = detection
         if self.hit_counter < self.hit_counter_max:
@@ -361,10 +371,17 @@ class TrackedObject:
             detection.age = self.age
             self.past_detections.append(detection)
 
+    def update_embeddings_ema(self, detection):
+        """Calculates an EMA over the TrackedObject's past detections embeddings"""
+        if detection.embedding is not None:
+            self.embeddings_ema = self.alpha * self.embeddings_ema + (1 - self.alpha) * detection.embedding 
+
+
 
 class Detection:
-    def __init__(self, points: np.array, scores=None, data=None, label=None):
+    def __init__(self, points: np.array, scores=None, data=None, label=None, embedding= None):
         self.points = points
         self.scores = scores
         self.data = data
         self.label = label
+        self.embedding = embedding
