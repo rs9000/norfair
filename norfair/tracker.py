@@ -19,7 +19,9 @@ class Tracker:
         detection_threshold: float = 0,
         filter_factory: "FilterPyKalmanFilterFactory" = FilterPyKalmanFilterFactory(),
         past_detections_length: int = 4,
-        ema_alpha: float = 0.9        
+        ema_alpha: float = 0.9,
+        reid_distance_function: Optional[Callable[["TrackedObject", "TrackedObject"], float]] = None,
+        reid_distance_threshold: float = 0
     ):
         self.tracked_objects: Sequence["TrackedObject"] = []
         self.distance_function = distance_function
@@ -49,6 +51,8 @@ class Tracker:
         self.detection_threshold = detection_threshold
         TrackedObject.count = 0
         self.ema_alpha = ema_alpha
+        self.reid_distance_function = reid_distance_function
+        self.reid_distance_threshold = reid_distance_threshold
 
     def update(self, detections: Optional[List["Detection"]] = None, period: int = 1):
         self.period = period
@@ -61,14 +65,29 @@ class Tracker:
             obj.tracker_step()
 
         # Update initialized tracked objects with detections
-        unmatched_detections = self.update_objects_in_place(
-            [o for o in self.tracked_objects if not o.is_initializing], detections
+        unmatched_detections, _, unmatched_init_trackers = self.update_objects_in_place(
+            self.distance_function,
+            self.distance_threshold,
+            [o for o in self.tracked_objects if not o.is_initializing],
+            detections,
         )
 
         # Update not yet initialized tracked objects with yet unmatched detections
-        unmatched_detections = self.update_objects_in_place(
-            [o for o in self.tracked_objects if o.is_initializing], unmatched_detections
+        unmatched_detections, matched_not_init_trackers, _ = self.update_objects_in_place(
+            self.distance_function,
+            self.distance_threshold,
+            [o for o in self.tracked_objects if o.is_initializing],
+            unmatched_detections,
         )
+
+        if self.reid_distance_function is not None:
+            # Match not yet initialized tracked objects with unmatched initialized tracked objects
+            _, matched_reid, _ = self.update_objects_in_place(
+                self.reid_distance_function,
+                self.reid_distance_threshold,
+                unmatched_init_trackers,
+                matched_not_init_trackers,
+            )
 
         # Create new tracked objects from remaining unmatched detections
         for detection in unmatched_detections:
@@ -82,7 +101,7 @@ class Tracker:
                     self.period,
                     self.filter_factory,
                     self.past_detections_length,
-                    self.ema_alpha
+                    self.ema_alpha,
                 )
             )
 
@@ -90,28 +109,30 @@ class Tracker:
 
     def update_objects_in_place(
         self,
+        distance_function,
+        distance_threshold,
         objects: Sequence["TrackedObject"],
-        detections: Optional[List["Detection"]],
+        detections: Optional[List["Detection"] or List["TrackedObject"]],
     ):
         if detections is not None and len(detections) > 0:
             distance_matrix = np.ones((len(detections), len(objects)), dtype=np.float32)
-            distance_matrix *= self.distance_threshold + 1
+            distance_matrix *= distance_threshold + 1
             for d, detection in enumerate(detections):
                 for o, obj in enumerate(objects):
                     if detection.label != obj.label:
-                        distance_matrix[d, o] = self.distance_threshold + 1
+                        distance_matrix[d, o] = distance_threshold + 1
                         if (detection.label is None) or (obj.label is None):
                             print(
                                 "\nThere are detections with and without label!"
                             )
                         continue
-                    distance = self.distance_function(detection, obj)
+                    distance = distance_function(detection, obj)
                     # Cap detections and objects with no chance of getting matched so we
                     # dont force the hungarian algorithm to minimize them and therefore
                     # introduce the possibility of sub optimal results.
                     # Note: This is probably not needed with the new distance minimizing algorithm
-                    if distance > self.distance_threshold:
-                        distance_matrix[d, o] = self.distance_threshold + 1
+                    if distance > distance_threshold:
+                        distance_matrix[d, o] = distance_threshold + 1
                     else:
                         distance_matrix[d, o] = distance
 
@@ -134,16 +155,21 @@ class Tracker:
             if distance_matrix.any():
                 for i, minimum in enumerate(distance_matrix.min(axis=0)):
                     objects[i].current_min_distance = (
-                        minimum if minimum < self.distance_threshold else None
+                        minimum if minimum < distance_threshold else None
                     )
 
             matched_det_indices, matched_obj_indices = self.match_dets_and_objs(
-                distance_matrix
+                distance_matrix,
+                distance_threshold
             )
             if len(matched_det_indices) > 0:
                 unmatched_detections = [
                     d for i, d in enumerate(detections) if i not in matched_det_indices
                 ]
+                unmatched_objects = [
+                    d for i, d in enumerate(objects) if i not in matched_obj_indices
+                ]
+                matched_objects = []
 
                 # Handle matched people/detections
                 for (match_det_idx, match_obj_idx) in zip(
@@ -152,19 +178,27 @@ class Tracker:
                     match_distance = distance_matrix[match_det_idx, match_obj_idx]
                     matched_detection = detections[match_det_idx]
                     matched_object = objects[match_obj_idx]
-                    if match_distance < self.distance_threshold:
-                        matched_object.hit(matched_detection, period=self.period)
-                        matched_object.last_distance = match_distance
+                    if match_distance < distance_threshold:
+                        if isinstance(matched_detection, Detection):
+                            matched_object.hit(matched_detection, period=self.period)
+                            matched_object.last_distance = match_distance
+                            matched_objects.append(matched_object)
+                        elif isinstance(matched_detection, TrackedObject):
+                            # Merge new TrackedObject with the old one
+                            matched_object.merge(matched_detection)
+                            # If we are matching tracked objects we want to get rid of the already matched candidate to avoid matching it again in next frames
+                            self.tracked_objects.remove(matched_detection)
                     else:
                         unmatched_detections.append(matched_detection)
+                        unmatched_objects.append(matched_object)
             else:
-                unmatched_detections = detections
+                unmatched_detections, matched_objects, unmatched_objects = detections, [], objects
         else:
-            unmatched_detections = []
+            unmatched_detections, matched_objects, unmatched_objects = [], [], objects
 
-        return unmatched_detections
+        return unmatched_detections, matched_objects, unmatched_objects
 
-    def match_dets_and_objs(self, distance_matrix: np.array):
+    def match_dets_and_objs(self, distance_matrix: np.array, distance_threshold):
         """Matches detections with tracked_objects from a distance matrix
 
         I used to match by minimizing the global distances, but found several
@@ -185,14 +219,14 @@ class Tracker:
             obj_idxs = []
             current_min = distance_matrix.min()
 
-            while current_min < self.distance_threshold:
+            while current_min < distance_threshold:
                 flattened_arg_min = distance_matrix.argmin()
                 det_idx = flattened_arg_min // distance_matrix.shape[1]
                 obj_idx = flattened_arg_min % distance_matrix.shape[1]
                 det_idxs.append(det_idx)
                 obj_idxs.append(obj_idx)
-                distance_matrix[det_idx, :] = self.distance_threshold + 1
-                distance_matrix[:, obj_idx] = self.distance_threshold + 1
+                distance_matrix[det_idx, :] = distance_threshold + 1
+                distance_matrix[:, obj_idx] = distance_threshold + 1
                 current_min = distance_matrix.min()
 
             return det_idxs, obj_idxs
@@ -214,7 +248,7 @@ class TrackedObject:
         period: int,
         filter_factory: "FilterFactory",
         past_detections_length: int,
-        alpha: float = 0.9
+        alpha: float = 0.9,
     ):
         try:
             initial_detection_points = validate_points(initial_detection.points)
@@ -374,8 +408,25 @@ class TrackedObject:
     def update_embeddings_ema(self, detection):
         """Calculates an EMA over the TrackedObject's past detections embeddings"""
         if detection.embedding is not None:
-            self.embeddings_ema = self.alpha * self.embeddings_ema + (1 - self.alpha) * detection.embedding 
+            self.embeddings_ema = (
+                self.alpha * self.embeddings_ema
+                + (1 - self.alpha) * detection.embedding
+            )
 
+    def merge(self, tracked_object):
+        """Merge with a not yet initialized TrackedObject instance"""
+        self.point_hit_counter = tracked_object.point_hit_counter
+        self.last_distance = tracked_object.last_distance
+        self.current_min_distance = tracked_object.current_min_distance
+        self.last_detection = tracked_object.last_detection
+        self.detected_at_least_once_points = (
+            tracked_object.detected_at_least_once_points
+        )
+        self.filter = tracked_object.filter
+
+        for past_detection in tracked_object.past_detections:
+            self.conditionally_add_to_past_detections(past_detection)
+            self.update_embeddings_ema(past_detection)
 
 
 class Detection:
