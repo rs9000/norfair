@@ -79,7 +79,10 @@ class Tracker:
                     self.detection_threshold,
                     self.period,
                     self.filter_factory,
-                    self.past_detections_length
+                    self.past_detections_length,
+                    detection.id,
+                    detection.message_type,
+                    detection.mmsi
                 )
             )
 
@@ -93,24 +96,10 @@ class Tracker:
         if detections is not None and len(detections) > 0:
             distance_matrix = np.ones((len(detections), len(objects)), dtype=np.float32)
             distance_matrix *= self.distance_threshold + 1
-            for d, detection in enumerate(detections):
-                for o, obj in enumerate(objects):
-                    if detection.label != obj.label:
-                        distance_matrix[d, o] = self.distance_threshold + 1
-                        if (detection.label is None) or (obj.label is None):
-                            print(
-                                "\nThere are detections with and without label!"
-                            )
-                        continue
-                    distance = self.distance_function(detection, obj)
-                    # Cap detections and objects with no chance of getting matched so we
-                    # dont force the hungarian algorithm to minimize them and therefore
-                    # introduce the possibility of sub optimal results.
-                    # Note: This is probably not needed with the new distance minimizing algorithm
-                    if distance > self.distance_threshold:
-                        distance_matrix[d, o] = self.distance_threshold + 1
-                    else:
-                        distance_matrix[d, o] = distance
+
+            if objects:
+                distance_matrix = self.distance_function(self.distance_threshold,
+                                                         detections, objects)
 
             if np.isnan(distance_matrix).any():
                 print(
@@ -126,13 +115,6 @@ class Tracker:
                 )
                 print("return distance_threshold + 1 from your distance function.")
                 exit()
-
-            # Used just for debugging distance function
-            if distance_matrix.any():
-                for i, minimum in enumerate(distance_matrix.min(axis=0)):
-                    objects[i].current_min_distance = (
-                        minimum if minimum < self.distance_threshold else None
-                    )
 
             matched_det_indices, matched_obj_indices = self.match_dets_and_objs(
                 distance_matrix
@@ -210,7 +192,10 @@ class TrackedObject:
         detection_threshold: float,
         period: int,
         filter_factory: "FilterFactory",
-        past_detections_length: int
+        past_detections_length: int,
+        id: Optional[int] = np.nan,
+        message_type: Optional[int] = np.nan,
+        mmsi: Optional[int] = np.nan
     ):
         try:
             initial_detection_points = validate_points(initial_detection.points)
@@ -235,6 +220,8 @@ class TrackedObject:
         self.age: int = 0
         self.is_initializing_flag: bool = True
         self.id: Optional[int] = None
+        self.message_type = message_type
+        self.mmsi = mmsi
         self.initializing_id: int = (
             TrackedObject.initializing_count
         )  # Just for debugging
@@ -348,7 +335,7 @@ class TrackedObject:
     def conditionally_add_to_past_detections(self, detection):
         """Adds detections into (and pops detections away) from `past_detections`
 
-        It does so by keeping a fixed amount of past detections saved into each 
+        It does so by keeping a fixed amount of past detections saved into each
         TrackedObject, while maintaining them distributed uniformly through the object's
         lifetime.
         """
@@ -363,8 +350,12 @@ class TrackedObject:
 
 
 class Detection:
-    def __init__(self, points: np.array, scores=None, data=None, label=None):
+    def __init__(self, points: np.array, scores=None, id=None, label=None, message_type=None, mmsi=None):
         self.points = points
         self.scores = scores
         self.data = data
+        self.id = id
         self.label = label
+        self.message_type = message_type
+        self.mmsi = mmsi
+
