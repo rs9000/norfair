@@ -58,7 +58,7 @@ messages_t2 = [Message("987298479", np.array([44, 22]), "873624", "AIS"),
 messages = [messages_t0, messages_t1, messages_t2]
 
 for t in messages:
-    detections = [Detection(points=[x.position for x in t],
+    detections = [Detection(points=np.array([x.position for x in t]),
                             mmsi=[x.mmsi for x in t],
                             message_type=[x.message_type for x in t])]
 

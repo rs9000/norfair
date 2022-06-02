@@ -353,7 +353,6 @@ class Detection:
     def __init__(self, points: np.array, scores=None, id=None, label=None, message_type=None, mmsi=None):
         self.points = points
         self.scores = scores
-        self.data = data
         self.id = id
         self.label = label
         self.message_type = message_type
