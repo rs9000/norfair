@@ -16,10 +16,10 @@ git clone https://github.com/rs9000/norfair
 
 ## How it works
 
-Define a matricial distance metrics
+Define a matrix euclidean distance metric
 
 ```python
-def matricial_euclidean(threshold, detections, objects):
+def matrix_euclidean(threshold, detections, objects):
     detections_arr = np.array([x.points for x in detections])
     objects_arr = np.array([x.estimate[0] for x in objects])
     same_mmsi = np.array([x.mmsi == y.mmsi for x in detections for y in objects]).reshape(len(detections), len(objects))
@@ -42,7 +42,7 @@ class Message():
         self.type = type
 
 
-tracker = Tracker(distance_function=matricial_euclidean, distance_threshold=0.5,
+tracker = Tracker(distance_function=matrix_euclidean, distance_threshold=0.5,
                   initialization_delay=3)
 
 messages_t0 = [Message("987298479", np.array([44, 22]), "873624", "AIS"),
